@@ -282,12 +282,8 @@ def build_pybind(ctx, modules, fd):
         if not k in defn[defnt]:
           defn[defnt][k] = t[k]
 
-  # Build the identities and typedefs (these are added to the class_map which
-  # is globally referenced).
-  build_identities(ctx, defn['identity'])
-  build_typedefs(ctx, defn['typedef'])
 
-  # this is temproary and specific to openconfig yang models.
+# this is temproary and specific to openconfig yang models.
   # the go packe name will be based on the name of the module
   # which contains either 1 or two names as seperated by "-"
   pkgname = "openconfig_unknownpkg"
@@ -298,9 +294,19 @@ def build_pybind(ctx, modules, fd):
       break
   ctx.pybind_common_hdr = "package %s\n\n" %(pkgname,)
   fd.write(ctx.pybind_common_hdr)
-  fd.write("import (\n")
-  fd.write("\t \"unicode\"\n")
-  fd.write(")\n")
+  #fd.write("import (\n")
+  #fd.write("\t \"unicode\"\n")
+  #fd.write(")\n")
+
+
+  # Build the identities and typedefs (these are added to the class_map which
+  # is globally referenced).
+  build_identities(ctx, defn['identity'])
+  build_typedefs(ctx, defn['typedef'])
+
+  CreateEnumerations(fd)
+
+
     
   # Iterate through the tree which pyang has built, solely for the modules
   # that pyang was asked to build
@@ -319,9 +325,29 @@ def build_pybind(ctx, modules, fd):
       #       if ch.keyword in statements.data_definition_keywords]
       get_children(ctx, fd, children, m, m)
 
-def build_enumerations(ctx, defnd):
+def CreateEnumerations(fd):
   # Build enumerations
-  pass
+  fd.write("""//enumerations\n""")
+  fd.write("""var (\n""")
+  for k, v in class_map.iteritems():
+    if "restriction_type" in v and \
+            v["restriction_type"] == "dict_key":
+      i = 0
+      for e, ev in v["restriction_argument"].iteritems():
+        value = i
+        if len(ev) > 0:
+          value = ev["value"]
+
+        name = k + "_" + e
+        if '-' in name:
+          name = '_'.join(name.split('-'))
+        if ':' in name:
+          name = '_'.join(name.split(':'))
+        i = value
+        i += 1
+
+        fd.write("\t%s = %d\n" % (name, value))
+  fd.write(""")\n""")
 
 
 def build_identities(ctx, defnd):
@@ -486,6 +512,7 @@ def build_typedefs(ctx, defnd):
       raise TypeError("Duplicate definition of %s" % type_name)
     default_stmt = item.search_one('default')
 
+    #print 'build typedefs', item, type_name, default_stmt, elemtype
     # 'elemtype' is a list when the type includes a union, so we need to go
     # through and build a type definition that supports multiple types.
     if not isinstance(elemtype,list):
@@ -656,8 +683,11 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
     structName = '%s' % safe_name(parent.arg)
     if not ctx.opts.split_class_dir:
       if not path == "":
-        structName = 'Yc_%s_%s' % (safe_name(module.arg),
+        structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg),
+                                      safe_name(module.arg),
                                    safe_name(path.replace("/", "_")))
+      else:
+        structName = 'Yc_%s' %(structName,)
     nfd.write("type %s struct {\n" % structName)
 
     # If the container is actually a list, then determine what the key value
@@ -866,18 +896,30 @@ def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
                                     safe_name(path.replace("/", "_")))
       nfd.write("func New%s() *%s {\n" % (structName, structName))
     else:
-      structName = '%s' % safe_name(parent.arg)[:1].upper() + safe_name(parent.arg)[1:]
-      nfd.write("func New%s() *%s {\n" % (safe_name(parent.arg),
+      structName = 'Yc_%s' % safe_name(parent.arg)
+      nfd.write("func New%s() *Yc_%s {\n" % (safe_name(parent.arg),
                                           safe_name(parent.arg)))
 
   # Generic NewFunc, set up the path_helper if asked to.
   nfd.write("\tnew := &%s{\n" % (structName))
   # Write out the classes that are stored locally as self.__foo where
   # foo is the safe YANG name.
+
   for c in classes:
     if classes[c]["default"] != 0:
-      nfd.write("\t\t%s : %s%s,\n" % (classes[c]["name"], \
-                                      classes[c]["base"], classes[c]["default"]))
+      default = classes[c]["default"]
+      if default not in class_bool_map.keys() and type(default) != type(1):
+        default = c + "_" + default
+        if '-' in default:
+          default = '_'.join(default.split('-'))
+        if ':' in default:
+          default = '_'.join(default.split(':'))
+        # TODO need to handle enumeration types
+        continue
+        #if "REJECT" in default:
+        #  print "DEFAULT", c, classes[c]
+      nfd.write("\t\t%s : %s%s,\n" % (classes[c]["name"],
+                                      classes[c]["base"], default))
   nfd.write("\t\t}\n")
   nfd.write("\treturn new\n}\n\n")
   return structName
@@ -900,17 +942,22 @@ def addGOStructMembers(elements, nfd):
       #print '******************************************'
       if isinstance(i["type"]["native_names"], list):
         for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
-          elements_str += "\t%s_%s %s\n" % (elemName, "_".join(subname.split("-")), nativetype)
+          subsubname = "_".join(subname.split("-"))
+          if ":" in subsubname:
+            subsubname = "_".join(subsubname.split(':'))
+
+          elements_str += "\t%s_%s %s\n" % (elemName, subsubname, nativetype)
       else:
-          elements_str += "\t%s %s\n" % (elemName, i["type"]["native_type"][0])
+          subname = i["type"]["native_type"]
+          if isinstance(subname, list):
+            subname = subname[0]
+          elements_str += "\t%s []%s\n" % (elemName, subname)
 
     elif i["class"] == "list":
       #print '******************************************'
-      #print "GO-STRUCT %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"])
+      #print "GO-STRUCT list %s %s %s" % (elemName, i["class"], i["type"])
       #print '******************************************'
-      listType = None
-      if isinstance(i["type"], list):
-        listType = i["type"]
+      listType = i["type"]
       elements_str += "\t%s []%s" % (elemName, listType)
     elif i["class"] == "union" or i["class"] == "leaf-union":
       #print '******************************************'
@@ -918,8 +965,13 @@ def addGOStructMembers(elements, nfd):
       #print '******************************************'
       # lets append the union name to the element name
       for subtype in i["type"][1]:
-        #print "UNION or UNION LEAF", subtype
-        elemName = elemName + "_" + "_".join(subtype[1]["yang_type"].split('-'))
+        # name just needs to be unique, choosing yang_type as postfix to the
+        # oritional varialble
+        subname = "_".join(subtype[1]["yang_type"].split('-'))
+        if ":" in subname:
+          subname = "_".join(subname.split(':'))
+
+        elemName = elemName + "_" + subname
         membertype = subtype[1]["native_type"]
         if isinstance(membertype, list):
           membertype = "[]%s" % membertype[0]
@@ -953,7 +1005,7 @@ def createGOStructMethods(elements, nfd, structName):
       nfd.write("\t}\n")
     elif precision is not None:
       nfd.write("""\n
-        \tvalue = float64(int(value * (10 * precision)) / (10 * precision))\n""")
+        \tvalue = float64(int(int(value) * (10 * precision)) / (10 * precision))\n""")
     nfd.write("""
       \td.%s = value
       \treturn true
@@ -966,14 +1018,25 @@ def createGOStructMethods(elements, nfd, structName):
     if i["class"] == "leaf-list":
       if isinstance(i["type"]["native_names"], list):
         for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
+          subsubname = "_".join(subname.split("-"))
+          if ":" in subsubname:
+            subsubname = "_".join(subsubname.split(":"))
+
+          argname = i["type"]["native_type"]
+          if isinstance(argname, list):
+            argname = argname[0]
+
           nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
-                    varName + "_" + "_".join(subname.split("-")),
-                    i["type"]["native_type"][0]))
+                    varName + "_" + subsubname,
+                    argname))
           skipBodyCreation = True
           createBody(varName, {}, None, nfd)
 
       else:
-          nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, i["type"]["native_type"][0]))
+          argname = i["type"]["native_type"]
+          if isinstance(argname, list):
+            argname = argname[0]
+          nfd.write("func (d *%s) %s_Set(value []%s) bool {" % (structName, varName, argname))
     elif i["class"] == "restricted-decimal64":
       precision = i["elemtype"]['precision']
       nfd.write("func (d *%s) %s_Set(value %s, precision int) bool {" % (structName, varName, i["type"]))
@@ -983,7 +1046,11 @@ def createGOStructMethods(elements, nfd, structName):
 
       for subtype in i["type"][1]:
         #print "UNION or UNION LEAF METHOD", subtype
-        varName = varName + "_" + "_".join(subtype[1]["yang_type"].split('-'))
+        subargname = "_".join(subtype[1]["yang_type"].split('-'))
+        if ":" in subargname:
+          subargname = "_".join(subargname.split(":"))
+
+        varName = varName + "_" + subargname
         argtype = subtype[1]["native_type"]
         if isinstance(argtype, list):
           argtype = "[]%s" % argtype[0]
@@ -991,6 +1058,9 @@ def createGOStructMethods(elements, nfd, structName):
         nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, argtype))
         skipBodyCreation = True
         createBody(varName, {}, None, nfd)
+    elif i["class"] == "list":
+      argtype = "[]%s" % i["type"]
+      nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, argtype))
     else:
       argtype = i["type"]
       if isinstance(argtype, list):
@@ -1123,7 +1193,7 @@ def build_elemtype(ctx, et, prefix=False):
         cls = "leafref"
       else:
         elemtype = {
-                    "native_type": "unicode",
+                    "native_type": "string",
                     "parent_type": "string",
                     "base_type": False,
                    }
@@ -1382,6 +1452,7 @@ def get_element(ctx, fd, element, module, parent, path,
     if create_list:
       if not cls == "leafref":
         cls = "leaf-list"
+        #print "CREATE LIST", elemname, elemtype
         if isinstance(elemtype, list):
           c = 0
           allowed_types = []
