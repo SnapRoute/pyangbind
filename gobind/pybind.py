@@ -287,15 +287,25 @@ def build_pybind(ctx, modules, fd):
   build_identities(ctx, defn['identity'])
   build_typedefs(ctx, defn['typedef'])
 
+  # this is temproary and specific to openconfig yang models.
+  # the go packe name will be based on the name of the module
+  # which contains either 1 or two names as seperated by "-"
+  pkgname = "openconfig_unknownpkg"
+  for modname in pyang_called_modules:
+    tmp = modname.split('-')
+    if len(tmp) == 2:
+      pkgname = tmp[0] + "_" + tmp[1]
+      break
+  ctx.pybind_common_hdr = "package %s\n\n" %(pkgname,)
+  fd.write(ctx.pybind_common_hdr)
+  fd.write("import (\n")
+  fd.write("\t \"unicode\"\n")
+  fd.write(")\n")
+    
   # Iterate through the tree which pyang has built, solely for the modules
   # that pyang was asked to build
   for modname in pyang_called_modules:
-    ctx.pybind_common_hdr = "package %s\n\n" % (modname.replace('-','_'))
-    fd.write(ctx.pybind_common_hdr)
-
-    fd.write("import (\n")
-    fd.write("\t \"unicode\"\n")
-    fd.write(")\n")
+    
     module = module_d[modname]
     mods = [module]
     for i in module.search('include'):
@@ -876,20 +886,47 @@ def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
 def addGOStructMembers(elements, nfd):
   elements_str = "\n"
   for i in elements:
-    elemName = i["name"][:1].upper() + i["name"][1:]
-    elements_str += "\t//yang_name: %s\n" % (i['yang_name'])
+    #print '******************************************'
+    #print "GO STRUCT", elements
+    #print '******************************************'
 
+    elemName = i["name"][:1].upper() + i["name"][1:]
+
+
+    elements_str += "\t//yang_name: %s class: %s\n" % (i['yang_name'], i['class'])
     if i["class"] == "leaf-list":
-      elements_str += "\t%s %s\n" % (elemName, i["type"]["native_type"])
+      #print '******************************************'
+      #print "GO-STRUCT %s %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"], type(i["type"]["native_names"]))
+      #print '******************************************'
+      if isinstance(i["type"]["native_names"], list):
+        for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
+          elements_str += "\t%s_%s %s\n" % (elemName, "_".join(subname.split("-")), nativetype)
+      else:
+          elements_str += "\t%s %s\n" % (elemName, i["type"]["native_type"][0])
+
     elif i["class"] == "list":
+      #print '******************************************'
+      #print "GO-STRUCT %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"])
+      #print '******************************************'
       listType = None
       if isinstance(i["type"], list):
         listType = i["type"]
       elements_str += "\t%s []%s" % (elemName, listType)
     elif i["class"] == "union" or i["class"] == "leaf-union":
-      nativeType = i["type"][1][0][1]["native_type"][0]
-      nativeType = "[]%s" % nativeType
-      elements_str += "\t%s %s\n" % (elemName, nativeType)
+      #print '******************************************'
+      #print "GO-STRUCT %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"])
+      #print '******************************************'
+      # lets append the union name to the element name
+      for subtype in i["type"][1]:
+        #print "UNION or UNION LEAF", subtype
+        elemName = elemName + "_" + "_".join(subtype[1]["yang_type"].split('-'))
+        membertype = subtype[1]["native_type"]
+        if isinstance(membertype, list):
+          membertype = "[]%s" % membertype[0]
+
+      #nativeType = i["type"][1][0][1]["native_type"][0]
+      #nativeType = "[]%s" % nativeType
+        elements_str += "\t%s %s\n" % (elemName, membertype)
     else:
       membertype = i["type"]
       if isinstance(membertype, list):
@@ -901,28 +938,13 @@ def addGOStructMembers(elements, nfd):
 
 
 def createGOStructMethods(elements, nfd, structName):
-  for i in elements:
-    precision = None
-    varName = i["name"][:1].upper() + i["name"][1:]
-    if i["class"] == "leaf-list":
-      nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, i["type"]["native_type"]))
-    elif i["class"] == "restricted-decimal64":
-      precision = i["elemtype"]['precision']
-      nfd.write("func (d *%s) %s_Set(value %s, precision int) bool {" % (structName, varName, i["type"]))
-    # elif i["class"] == "list":
-    #  continue
-    elif i["class"] == "union" or i["class"] == "leaf-union":
-      argType = i["type"][1][0][1]["native_type"][0]
-      argType = "[]%s" % argType
-      nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, argtype))
-    else:
-      argtype = i["type"]
-      if isinstance(argtype, list):
-        argtype = "[]%s" % argtype[0]
-      nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, argtype))
+
+  def createBody(varName, i, precision, nfd):
+
+    #print "CREATE BODY: ", varName, i, precision
     if "elemtype" in i and \
-                    "restriction_dict" in i["elemtype"] and \
-                    "range" in i["elemtype"]["restriction_dict"]:
+        "restriction_dict" in i["elemtype"] and \
+        "range" in i["elemtype"]["restriction_dict"]:
       rangeStr = i["elemtype"]["restriction_dict"]["range"].strip('u').strip('\'')
       minMaxList = rangeStr.split('..')
       minVal, maxVal = minMaxList[0], minMaxList[1]
@@ -937,6 +959,46 @@ def createGOStructMethods(elements, nfd, structName):
       \treturn true
       }\n""" % (varName,))
 
+  for i in elements:
+    skipBodyCreation = False
+    precision = None
+    varName = i["name"][:1].upper() + i["name"][1:]
+    if i["class"] == "leaf-list":
+      if isinstance(i["type"]["native_names"], list):
+        for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
+          nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
+                    varName + "_" + "_".join(subname.split("-")),
+                    i["type"]["native_type"][0]))
+          skipBodyCreation = True
+          createBody(varName, {}, None, nfd)
+
+      else:
+          nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, i["type"]["native_type"][0]))
+    elif i["class"] == "restricted-decimal64":
+      precision = i["elemtype"]['precision']
+      nfd.write("func (d *%s) %s_Set(value %s, precision int) bool {" % (structName, varName, i["type"]))
+    # elif i["class"] == "list":
+    #  continue
+    elif i["class"] == "union" or i["class"] == "leaf-union":
+
+      for subtype in i["type"][1]:
+        #print "UNION or UNION LEAF METHOD", subtype
+        varName = varName + "_" + "_".join(subtype[1]["yang_type"].split('-'))
+        argtype = subtype[1]["native_type"]
+        if isinstance(argtype, list):
+          argtype = "[]%s" % argtype[0]
+
+        nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, argtype))
+        skipBodyCreation = True
+        createBody(varName, {}, None, nfd)
+    else:
+      argtype = i["type"]
+      if isinstance(argtype, list):
+        argtype = "[]%s" % argtype[0]
+      nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName, varName, argtype))
+
+    if not skipBodyCreation:
+      createBody(varName, i, precision, nfd)
 
 def build_elemtype(ctx, et, prefix=False):
   # Build a dictionary which defines the type for the element. This is used
@@ -1316,24 +1378,30 @@ def get_element(ctx, fd, element, module, parent, path,
     # Deal with the cases that there is a requirement to create a list - these
     # are leaf lists. There is some special handling for leaf-lists to ensure
     # that the references are correctly created.
+    subnames = None
     if create_list:
       if not cls == "leafref":
         cls = "leaf-list"
         if isinstance(elemtype, list):
           c = 0
           allowed_types = []
+          subnames = []
           for subtype in elemtype:
             # nested union within a leaf-list type
             if isinstance(subtype, tuple):
               if subtype[0] == "leaf-union":
                 for subelemtype in subtype[1]["native_type"]:
+                  subnames.append(subelemtype["yang_type"])
                   allowed_types.append(subelemtype)
               else:
                 if isinstance(subtype[1]["native_type"], list):
+                  subnames.append(subtype[1]["yang_type"])
                   allowed_types.extend(subtype[1]["native_type"])
                 else:
+                  subnames.append(subtype[1]["yang_type"])
                   allowed_types.append(subtype[1]["native_type"])
             else:
+              subnames.append(subtype["yang_type"])
               allowed_types.append(subtype["native_type"])
         else:
           allowed_types = elemtype["native_type"]
@@ -1345,7 +1413,16 @@ def get_element(ctx, fd, element, module, parent, path,
                           "referenced_path": elemtype["referenced_path"],
                           "require_instance": elemtype["require_instance"],
                         }
-      elemntype = {"class": cls, "native_type": "[]%s" %allowed_types}
+
+      elemntype = {"class": cls, "native_type": allowed_types, "native_names": subnames}
+
+
+      #print "=============================================================="
+      #print "ELEMNTYPE", elemntype
+      #print "=============================================================="
+
+
+
 
     else:
       if cls == "union" or cls == "leaf-union":
@@ -1383,5 +1460,8 @@ def get_element(ctx, fd, element, module, parent, path,
 
     this_object.append(elemdict)
 
+  #print '==============================================================='
+  #print "ELEMENT DICT", elemdict
+  #print '==============================================================='
   return this_object
 
