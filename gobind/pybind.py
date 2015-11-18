@@ -118,16 +118,39 @@ reserved_name = ["list", "str", "int", "global", "decimal", "float",
                   "pop", "insert", "remove", "add", "delete", "local",
                   "get", "default", "yang_name"]
 
+
+ENABLE_CAMEL_CASE = True
+
 def safe_name(arg):
   """
     Make a leaf or container name safe for use in Python.
   """
-  k = arg
-  arg = arg.replace("-", "_")
-  arg = arg.replace(".", "_")
-  arg = arg.replace(":", "_")
+  #print "safe_name", arg
+  if ENABLE_CAMEL_CASE:
+    l = arg.split('-')
+    if len(l) > 0:
+      arg = "".join([x[0].upper() + x[1:] for x in l if x != ''])
+    l = arg.split('.')
+    if len(l) > 0:
+      arg = "".join([x[0].upper() + x[1:] for x in l if x != ''])
+    l = arg.split(':')
+    if len(l) > 0:
+      arg = "".join([x[0].upper() + x[1:] for x in l if x != ''])
+    l = arg.split('_')
+    if len(l) > 0:
+      arg = "".join([x[0].upper() + x[1:] for x in l if x != ''])
+    l = arg.split('/')
+    if len(l) > 0:
+      arg = "".join([x[0].upper() + x[1:] for x in l if x != ''])
+
+  else:
+    arg = arg.replace("-", "_")
+    arg = arg.replace(".", "_")
+    arg = arg.replace(":", "_")
+
   if arg in reserved_name:
     arg += "_"
+
   # store the unsafe->original version mapping
   # so that we can retrieve it when get() is called.
   return arg
@@ -668,13 +691,15 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
     # create struct skeleton
     # this will create the beginning of the struct definition
     structName = CreateStructSkeleton(module, nfd, parent, path)
-
-    addStructDescription(module, nfd, parent, path)
+    if structName != '':
+      addStructDescription(module, nfd, parent, path)
+    else:
+      return None
   else:
     raise TypeError("unhandled keyword with children %s" % parent.keyword)
 
   elements_str = ""
-  if len(elements) == 0:
+  if len(elements) == 0 and structName not in (None, ''):
     nfd.write("}\n")
   else:
 
@@ -749,10 +774,8 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
     # are a bit ugly. The intention here is to act like an immutable type - such
     # that new class instances are created each time that the value is set.
     structName = createGONewStructMethod(ctx, module, classes, nfd, parent, path)
-
-    createGOStructMethods(elements, nfd, structName)
-  if ctx.opts.split_class_dir:
-    nfd.close()
+    if structName != '':
+      createGOStructMethods(elements, nfd, structName)
 
   return None
 
@@ -780,50 +803,50 @@ def addStructDescription(module, nfd, parent, path):
 
 
 def CreateStructSkeleton(module, nfd, parent, path, write=True):
-  structName = '%s' % safe_name(parent.arg)
-  if not path == "":
-    structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg),
-                                  safe_name(module.arg),
-                                  safe_name(path.replace("/", "_")))
+  if not ENABLE_CAMEL_CASE:
+    structName = '%s' % safe_name(parent.arg)
+    if not path == "":
+      structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg),
+                                    safe_name(module.arg),
+                                    safe_name(path.replace("/", "_")))
+    else:
+      structName = 'Yc_%s' % (structName,)
   else:
-    structName = 'Yc_%s' % (structName,)
+    structName = '%s' % safe_name(safe_name(path.replace("/", "_")))
 
-  if write:
+  #if 'Config' == structName[-6:]:
+  #  structName = structName[:-6]
+
+  if write and structName != '':
     nfd.write("type %s struct {\n" % structName)
 
   return structName
 
 def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
-  structName = ''
-  if not path == "":
-    structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg), \
-                                  safe_name(module.arg),
-                                  safe_name(path.replace("/", "_")))
+
+  structName = CreateStructSkeleton(module, nfd, parent, path, write=False)
+  if structName != '':
     nfd.write("func New%s() *%s {\n" % (structName, structName))
-  else:
-    structName = 'Yc_%s' % safe_name(parent.arg)
-    nfd.write("func New%s() *Yc_%s {\n" % (safe_name(parent.arg),
-                                        safe_name(parent.arg)))
 
-  # Generic NewFunc, set up the path_helper if asked to.
-  nfd.write("\tnew := &%s{\n" % (structName))
-  # Write out the classes that are stored locally as self.__foo where
-  # foo is the safe YANG name.
+    # Generic NewFunc, set up the path_helper if asked to.
+    nfd.write("\tnew := &%s{\n" % (structName))
+    # Write out the classes that are stored locally as self.__foo where
+    # foo is the safe YANG name.
 
-  for c in classes:
-    if classes[c]["default"] != 0:
-      default = classes[c]["default"]
-      if default not in class_bool_map.keys() and type(default) != type(1):
-        default = c + "_" + default
-        default = safe_name(default)
-        # TODO need to handle enumeration types
-        continue
-        #if "REJECT" in default:
-        #  print "DEFAULT", c, classes[c]
-      nfd.write("\t\t%s : %s%s,\n" % (classes[c]["name"],
-                                      classes[c]["base"], default))
-  nfd.write("\t\t}\n")
-  nfd.write("\treturn new\n}\n\n")
+    for c in classes:
+      if classes[c]["default"] != 0:
+        default = classes[c]["default"]
+        if default not in class_bool_map.keys() and type(default) != type(1):
+          default = c + "_" + default
+          default = safe_name(default)
+          # TODO need to handle enumeration types
+          continue
+          #if "REJECT" in default:
+          #  print "DEFAULT", c, classes[c]
+        nfd.write("\t\t%s : %s%s,\n" % (classes[c]["name"],
+                                        classes[c]["base"], default))
+    nfd.write("\t\t}\n")
+    nfd.write("\treturn new\n}\n\n")
   return structName
 
 
@@ -834,6 +857,9 @@ def addGOStructMembers(structName, elements, keyval, nfd):
   if isinstance(keyval, list):
     keyname = keyval[0]
 
+  if keyname not in class_bool_map and \
+     type(keyname) not in [type(1), bool]:
+    keyname = keyname[:1].upper() + keyname[1:]
 
   for i in elements:
     #print '******************************************'
@@ -908,7 +934,7 @@ def addGOStructMembers(structName, elements, keyval, nfd):
       if isinstance(membertype, list):
         membertype = "[]%s" % membertype[0]
 
-      #print "i[name]", i["name"], keyval
+      #print "i[name]", i["name"], keyname
       if keyname == i["name"]:
         elements_str += "\t%s %s  %s\n" % (elemName, membertype, LIST_KEY_STR)
       else:
@@ -1222,19 +1248,9 @@ def get_element(ctx, fd, element, module, parent, path,
                  }
       # Handle the different cases of class name, this depends on whether we
       # were asked to split the bindings into a directory structure or not.
-      if ctx.opts.split_class_dir:
-        # If we were dealing with split classes, then rather than naming the
-        # class based on a unique intra-file name - and rather we must import
-        # the relative path to the module.class
-        elemdict["type"] = "%s.%s" % (safe_name(element.arg),\
-                                      safe_name(element.arg))
 
-      else:
-        # Otherwise, give a unique name for the class within the dictionary.
-        elemdict["type"] = "Yc_%s_%s_%s" % (safe_name(element.arg),
-                                            safe_name(module.arg),
-                                            safe_name(path.replace("/", "_")))
-        print 'creating unique class name', elemdict["type"]
+      elemdict["type"] = CreateStructSkeleton(module, fd, element, path, write=False)
+      print 'creating unique class name', elemdict["type"]
 
       # Deal with specific cases for list - such as the key and how it is
       # ordered.
