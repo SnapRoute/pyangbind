@@ -22,13 +22,11 @@ import optparse
 import sys
 import re
 import string
-import numpy as np
 import decimal
 import copy
 import os
 import subprocess
 from bitarray import bitarray
-from lib.yangtypes import safe_name, YANGBool
 
 from pyang import plugin
 from pyang import statements
@@ -37,6 +35,11 @@ DEBUG = True
 if DEBUG:
   import pprint
   pp = pprint.PrettyPrinter(indent=2)
+
+
+# for each structure there may be a 'list' key that should be identified
+# for purposes of a DB
+LIST_KEY_STR = '`SNAPROUTE: KEY`'
 
 # YANG is quite flexible in terms of what it allows as input to a boolean
 # value, this map is used to provide a mapping of these values to the python
@@ -85,27 +88,49 @@ class_map = {
                           "base_type": True, "quote_arg": True},
   'binary':           {"native_type": "bitarray", "base_type": True,
                           "quote_arg": True},
-  #'date-and-time':     {"native_type": "time.Time", "base_type": True},
-  #'yang:date-and-time':     {"native_type": "time.Time", "base_type": True},
-  'uint8':            {"native_type": "uint8", "base_type": True},
-  'uint16':           {"native_type": "uint16", "base_type": True},
-  'uint32':           {"native_type": "uint32", "base_type": True},
-  'uint64':           {"native_type": "uint64", "base_type": True},
+  'uint8':            {"native_type": "uint8", "base_type": True, "max": "^uint8(0)"},
+  'uint16':           {"native_type": "uint16", "base_type": True, "max": "^uint16(0)"},
+  'uint32':           {"native_type": "uint32", "base_type": True, "max": "^uint32(0)"},
+  'uint64':           {"native_type": "uint64", "base_type": True, "max": "^uint64(0)"},
   'string':           {"native_type": "string", "base_type": True,
                           "quote_arg": True},
   'decimal64':        {"native_type": "float64", "base_type": True},
   'empty':            {"native_type": "bool", "map": class_bool_map,
                           "base_type": True, "quote_arg": True},
-  'int8':             {"native_type": "int8", "base_type": True},
-  'int16':            {"native_type": "int16", "base_type": True},
-  'int32':            {"native_type": "int32", "base_type": True},
-  'int64':            {"native_type": "int64", "base_type": True},
+  'int8':             {"native_type": "int8", "base_type": True, "max": "^int8(0)"},
+  'int16':            {"native_type": "int16", "base_type": True, "max": "^int16(0)"},
+  'int32':            {"native_type": "int32", "base_type": True, "max": "^uint32(0)"},
+  'int64':            {"native_type": "int64", "base_type": True, "max": "^uint64(0)"},
 }
 
 # We have a set of types which support "range" statements in RFC6020. This
 # list determins types that should be allowed to have a "range" argument.
 INT_RANGE_TYPES = ["uint8", "uint16", "uint32", "uint64",
                     "int8", "int16", "int32", "int64"]
+
+
+# Words that could turn up in YANG definition files that are actually
+# reserved names in Python, such as being builtin types. This list is
+# not complete, but will probably continue to grow.
+reserved_name = ["list", "str", "int", "global", "decimal", "float",
+                  "as", "if", "else", "elsif", "map", "set", "class",
+                  "from", "import", "pass", "return", "is", "exec",
+                  "pop", "insert", "remove", "add", "delete", "local",
+                  "get", "default", "yang_name"]
+
+def safe_name(arg):
+  """
+    Make a leaf or container name safe for use in Python.
+  """
+  k = arg
+  arg = arg.replace("-", "_")
+  arg = arg.replace(".", "_")
+  arg = arg.replace(":", "_")
+  if arg in reserved_name:
+    arg += "_"
+  # store the unsafe->original version mapping
+  # so that we can retrieve it when get() is called.
+  return arg
 
 
 gDryRun =  False
@@ -226,12 +251,7 @@ def build_pybind(ctx, modules, fd):
   # Build the common set of imports that all pyangbind files needs
   ctx.pybind_common_hdr = ""
 
-  if not ctx.opts.split_class_dir:
-    fd.write(ctx.pybind_common_hdr)
-  else:
-    ctx.pybind_split_basepath = os.path.abspath(ctx.opts.split_class_dir)
-    if not os.path.exists(ctx.pybind_split_basepath):
-      os.makedirs(ctx.pybind_split_basepath)
+  fd.write(ctx.pybind_common_hdr)
 
   # Determine all modules, and submodules that are needed, along with the
   # prefix that is used for it. We need to ensure that we understand all of the
@@ -304,14 +324,19 @@ def build_pybind(ctx, modules, fd):
   build_identities(ctx, defn['identity'])
   build_typedefs(ctx, defn['typedef'])
 
+  # create the enumerations
   CreateEnumerations(fd)
 
+  # create the structs and functions associated with the structs
+  CreateGoStructAndFunc(ctx, fd, module_d, pyang_called_modules)
 
-    
+
+
+def CreateGoStructAndFunc(ctx, fd, module_d, pyang_called_modules):
   # Iterate through the tree which pyang has built, solely for the modules
   # that pyang was asked to build
   for modname in pyang_called_modules:
-    
+
     module = module_d[modname]
     mods = [module]
     for i in module.search('include'):
@@ -320,10 +345,11 @@ def build_pybind(ctx, modules, fd):
         mods.append(subm)
     for m in mods:
       children = [ch for ch in module.i_children
-            if ch.keyword in statements.data_definition_keywords]
-      #children = [ch for ch in m.i_groupings.values()
+                  if ch.keyword in statements.data_definition_keywords]
+      # children = [ch for ch in m.i_groupings.values()
       #       if ch.keyword in statements.data_definition_keywords]
       get_children(ctx, fd, children, m, m)
+
 
 def CreateEnumerations(fd):
   # Build enumerations
@@ -339,16 +365,12 @@ def CreateEnumerations(fd):
           value = ev["value"]
 
         name = k + "_" + e
-        if '-' in name:
-          name = '_'.join(name.split('-'))
-        if ':' in name:
-          name = '_'.join(name.split(':'))
+        name = safe_name(name)
         i = value
         i += 1
 
         fd.write("\t%s = %d\n" % (name, value))
   fd.write(""")\n""")
-
 
 def build_identities(ctx, defnd):
   # Build dicionaries which determine how identities work. Essentially, an
@@ -605,37 +627,6 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
   used_types,elements = [],[]
   choices = False
 
-  # When pyangbind was asked to split classes, then we need to create the
-  # relevant directories for the modules to be created into. In this case
-  # even though fd might be a valid file handle, we ignore it.
-  ''' 11/13/15 NOT SUPPORTED
-  if ctx.opts.split_class_dir:
-    if path == "":
-      fpath = ctx.pybind_split_basepath + "/__init__.py"
-    else:
-      pparts = path.split("/")
-      npath = "/"
-      for pp in pparts:
-        npath += safe_name(pp) + "/"
-      bpath = ctx.pybind_split_basepath + npath
-      if not os.path.exists(bpath):
-        os.makedirs(bpath)
-      fpath = bpath + "/__init__.py"
-    if not os.path.exists(fpath):
-      try:
-        nfd = open(fpath, 'w')
-      except IOError, m:
-        raise IOError, "could not open pyangbind output file (%s)" % m
-      nfd.write(ctx.pybind_common_hdr)
-    else:
-      try:
-        nfd = open(fpath, 'a')
-      except IOError, w:
-        raise IOError, "could not open pyangbind output file (%s)" % m
-  else:
-  '''
-  # If we weren't asked to split the files, then just use the file handle
-  # provided.
   nfd = fd
 
   if parent_cfg:
@@ -654,8 +645,6 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
   # that they are imported. Additionally, we need to find the elements that are
   # within a case, and ensure that these are built with the corresponding
   # choice specified.
-  if ctx.opts.split_class_dir:
-    import_req = []
   for ch in i_children:
     if ch.keyword == "choice":
       for choice_ch in ch.i_children:
@@ -671,24 +660,24 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
         if hasattr(ch, "i_children") and len(ch.i_children):
           import_req.append(ch.arg)
 
-  # Write out the import statements if needed.
-  if ctx.opts.split_class_dir:
-    if len(import_req):
-      for im in import_req:
-        nfd.write("""import %s\n""" % safe_name(im))
-
   # 'container', 'module', 'list' and 'submodule' all have their own classes
   # generated.
+  structName = None
   if parent.keyword in ["container", "module", "list", "submodule"]:
-    structName = '%s' % safe_name(parent.arg)
-    if not ctx.opts.split_class_dir:
-      if not path == "":
-        structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg),
-                                      safe_name(module.arg),
-                                   safe_name(path.replace("/", "_")))
-      else:
-        structName = 'Yc_%s' %(structName,)
-    nfd.write("type %s struct {\n" % structName)
+
+    # create struct skeleton
+    # this will create the beginning of the struct definition
+    structName = CreateStructSkeleton(module, nfd, parent, path)
+
+    addStructDescription(module, nfd, parent, path)
+  else:
+    raise TypeError("unhandled keyword with children %s" % parent.keyword)
+
+  elements_str = ""
+  if len(elements) == 0:
+    nfd.write("}\n")
+  else:
+
 
     # If the container is actually a list, then determine what the key value
     # is and store this such that we can give a hint.
@@ -701,38 +690,9 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
       else:
         keyval = [keyval,]
 
-    # Auto-generate a docstring based on the description that is provided in
-    # the YANG module. This aims to provide readability to someone perusing the
-    # code that is generated.
-    parent_descr = parent.search_one('description')
-    if parent_descr is not None:
-      parent_descr = "\n\n\tYANG Description: %s " % \
-        parent_descr.arg.decode('utf8').encode('ascii', 'ignore')
-    else:
-      parent_descr = ""
+    # add the structure members
+    addGOStructMembers(structName, elements, keyval, nfd)
 
-    # Add more helper text.
-    nfd.write("""\t/*
-    This class was auto-generated by the GOSTRUCT plugin for PYANG
-    from YANG module %s
-    based on the path %s.
-    Each member element of the container is represented as a struct
-    variable - with a specific YANG type.%s
-    */\n"""  % (module.arg, (path if not path == "" else "/%s" % parent.arg), \
-                    parent_descr))
-  else:
-    raise TypeError("unhandled keyword with children %s" % parent.keyword)
-
-  elements_str = ""
-  if len(elements) == 0:
-    nfd.write("}\n")
-  else:
-    # We want to prevent a user from creating new attributes on a class that
-    # are not allowed within the data model - this uses the __slots__ magic
-    # variable of the class to restrict anyone from adding to these classes.
-    # Doing so gives an AttributeError when a user tries to specify something
-    # that was not in the model.
-    addGOStructMembers(elements, nfd)
 
     choices = {}
     choice_attrs = []
@@ -759,8 +719,6 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
       if i["class"] == "leaf-list":
         # Map a leaf-list to the type specified in the class map. This is a
         # TypedList (see lib.yangtypes) with a particular set of types allowed.
-        class_str["type"] = "YANGDynClass"
-        class_str["arg"] = "base="
         if isinstance(i["type"]["native_type"][1], list):
           allowed_type = "["
           for subtype in i["type"]["native_type"][1]:
@@ -768,110 +726,25 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
           allowed_type += "]"
         else:
           allowed_type = "%s" % (i["type"]["native_type"][1])
-        class_str["arg"] += "%s(allowed_type=%s)" % \
-          (i["type"]["native_type"][0],allowed_type)
 
         class_str["base"] = "%s(allowed_type=%s)" % \
           (i["type"]["native_type"][0],allowed_type)
         if "default" in i and not i["default"] is None:
-          class_str["arg"] += ", default=%s" % (default_arg)
           class_str["default"] = default_arg
-      elif i["class"] == "list":
-        # Map a list to YANGList class - this is dynamically derived by the
-        # YANGListType function to have the relevant characteristics, such as
-        # whether it is ordered by the user.
-        class_str["type"] = "YANGDynClass"
-        class_str["arg"] = "base=YANGListType("
-        class_str["arg"] += "%s,%s" % ("\"%s\"" % i["key"] if i["key"] \
-                                                  else False, i["type"])
-        class_str["arg"] += ", yang_name=\"%s\", parent=self" % (i["yang_name"])
-        class_str["arg"] += ", is_container='list', user_ordered=%s" \
-                                                  % i["user_ordered"]
-        class_str["arg"] += ", path_helper=self._path_helper"
-        if i["choice"]:
-          class_str["arg"] += ", choice=%s" % repr(choice)
-        class_str["arg"] += ")"
-
+      #elif i["class"] == "list":
+        # nothing to do
       elif i["class"] == "union" or i["class"] == "leaf-union":
-        # A special mapped type where there is a union that just includes leaves
-        # this is mapped to a particular Union type, and valid types within it
-        # provided. The dynamically generated class will determine whether the
-        # input can be mapped to the types included in the union.
-        class_str["type"] = "YANGDynClass"
-        class_str["arg"] = "base=["
-        for u in i["type"][1]:
-          if isinstance(u[1]["native_type"], list):
-            for su_native_type in u[1]["native_type"]:
-              class_str["arg"] += "%s," % su_native_type
-          else:
-            class_str["arg"] += "%s," % u[1]["native_type"]
-        class_str["arg"] += "]"
         if "default" in i and not i["default"] is None:
-          class_str["arg"] += ", default=%s" % (default_arg)
           class_str["default"] = default_arg
-      elif i["class"] == "leafref":
-        # A leafref, pyangbind uses the special ReferenceType which performs a
-        # lookup against the path_helper class provided.
-        class_str["type"] = "YANGDynClass"
-        class_str["arg"] = "base=%s" % i["type"]
-        class_str["arg"] += "(referenced_path='%s'" % i["referenced_path"]
-        class_str["arg"] += ", caller=self._path() + ['%s'], " \
-                                % (i["yang_name"])
-        class_str["arg"] += "path_helper=self._path_helper, "
-        class_str["arg"] += "require_instance=%s)" % (i["require_instance"])
-      elif i["class"] == "leafref-list":
-        # Deal with the special case of a list of leafrefs, since the
-        # ReferenceType has different arguments that need to be provided to the
-        # class to properly initialise.
-        class_str["type"] = "YANGDynClass"
-        class_str["arg"] = "base=%s" % i["type"]["native_type"][0]
-        class_str["arg"] += "(allowed_type=%s(referenced_path='%s'," \
-                              % (i["type"]["native_type"][1]["native_type"], \
-                                 i["type"]["native_type"][1]["referenced_path"])
-        class_str["arg"] += "caller=self._path() + ['%s'], " % i["yang_name"]
-        class_str["arg"] += "path_helper=self._path_helper, "
-        class_str["arg"] += "require_instance=%s))" % \
-                              (i["type"]["native_type"][1]["require_instance"])
+      #elif i["class"] == "leafref":
+
+      #elif i["class"] == "leafref-list":
+
       else:
-        # Generically handle all other classes with the 'standard' mappings.
-        class_str["type"] = "YANGDynClass"
-        if isinstance(i["type"],list):
-          class_str["arg"] = "base=["
-          for u in i["type"]:
-            class_str["arg"] += "%s," % u
-          class_str["arg"] += "]"
-        else:
-          class_str["arg"] = "base=%s" % i["type"]
         if "default" in i and not i["default"] is None:
-          class_str["arg"] += ", default=%s" % (default_arg)
           class_str["default"] = default_arg
 
-      if i["class"] == "container":
-        class_str["arg"] += ", is_container='container'"
-      elif i["class"] == "list":
-        class_str["arg"] += ", is_container='list'"
-      elif i["class"] == "leaf-list":
-        class_str["arg"] += ", is_leaf=False"
-      else:
-        class_str["arg"] += ", is_leaf=True"
-      if class_str["arg"]:
-        class_str["arg"] += ", yang_name=\"%s\"" % i["yang_name"]
-        class_str["arg"] += ", parent=self"
-        if i["choice"]:
-          class_str["arg"] += ", choice=%s" % repr(i["choice"])
-          choice_attrs.append(i["name"])
-          if not i["choice"][0] in choices:
-            choices[i["choice"][0]] = {}
-          if not i["choice"][1] in choices[i["choice"][0]]:
-            choices[i["choice"][0]][i["choice"][1]] = []
-          choices[i["choice"][0]][i["choice"][1]].append(i["name"])
-        class_str["arg"] += ", path_helper=self._path_helper"
-        class_str["arg"] += ", extmethods=self._extmethods"
-        if "extensions" in i:
-          class_str["arg"] += ", extensions=%s" % i["extensions"]
-        if keyval and i["yang_name"] in keyval:
-          class_str["arg"] += ", is_keyval=True"
-        classes[i["name"]] = class_str
+      classes[i["name"]] = class_str
     # TODO: get and set methods currently have errors that are reported that
     # are a bit ugly. The intention here is to act like an immutable type - such
     # that new class instances are created each time that the value is set.
@@ -884,21 +757,53 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
   return None
 
 
+def addStructDescription(module, nfd, parent, path):
+  # Auto-generate a docstring based on the description that is provided in
+  # the YANG module. This aims to provide readability to someone perusing the
+  # code that is generated.
+  parent_descr = parent.search_one('description')
+  if parent_descr is not None:
+    parent_descr = "\n\n\tYANG Description: %s " % \
+                   parent_descr.arg.decode('utf8').encode('ascii', 'ignore')
+  else:
+    parent_descr = ""
+
+  # Add more helper text.
+  nfd.write("""\t/*
+    This class was auto-generated by the GOSTRUCT plugin for PYANG
+    from YANG module %s
+    based on the path %s.
+    Each member element of the container is represented as a struct
+    variable - with a specific YANG type.%s
+    */\n""" % (module.arg, (path if not path == "" else "/%s" % parent.arg), \
+               parent_descr))
+
+
+def CreateStructSkeleton(module, nfd, parent, path, write=True):
+  structName = '%s' % safe_name(parent.arg)
+  if not path == "":
+    structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg),
+                                  safe_name(module.arg),
+                                  safe_name(path.replace("/", "_")))
+  else:
+    structName = 'Yc_%s' % (structName,)
+
+  if write:
+    nfd.write("type %s struct {\n" % structName)
+
+  return structName
+
 def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
   structName = ''
-  if ctx.opts.split_class_dir:
-    structName = '%s' % safe_name(parent.arg)[:1].upper() + safe_name(parent.arg)[1:]
+  if not path == "":
+    structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg), \
+                                  safe_name(module.arg),
+                                  safe_name(path.replace("/", "_")))
     nfd.write("func New%s() *%s {\n" % (structName, structName))
   else:
-    if not path == "":
-      structName = 'Yc_%s_%s_%s' % (safe_name(parent.arg), \
-                                    safe_name(module.arg),
-                                    safe_name(path.replace("/", "_")))
-      nfd.write("func New%s() *%s {\n" % (structName, structName))
-    else:
-      structName = 'Yc_%s' % safe_name(parent.arg)
-      nfd.write("func New%s() *Yc_%s {\n" % (safe_name(parent.arg),
-                                          safe_name(parent.arg)))
+    structName = 'Yc_%s' % safe_name(parent.arg)
+    nfd.write("func New%s() *Yc_%s {\n" % (safe_name(parent.arg),
+                                        safe_name(parent.arg)))
 
   # Generic NewFunc, set up the path_helper if asked to.
   nfd.write("\tnew := &%s{\n" % (structName))
@@ -910,10 +815,7 @@ def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
       default = classes[c]["default"]
       if default not in class_bool_map.keys() and type(default) != type(1):
         default = c + "_" + default
-        if '-' in default:
-          default = '_'.join(default.split('-'))
-        if ':' in default:
-          default = '_'.join(default.split(':'))
+        default = safe_name(default)
         # TODO need to handle enumeration types
         continue
         #if "REJECT" in default:
@@ -925,8 +827,14 @@ def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
   return structName
 
 
-def addGOStructMembers(elements, nfd):
+def addGOStructMembers(structName, elements, keyval, nfd):
   elements_str = "\n"
+
+  keyname = keyval
+  if isinstance(keyval, list):
+    keyname = keyval[0]
+
+
   for i in elements:
     #print '******************************************'
     #print "GO STRUCT", elements
@@ -934,31 +842,68 @@ def addGOStructMembers(elements, nfd):
 
     elemName = i["name"][:1].upper() + i["name"][1:]
 
-
     elements_str += "\t//yang_name: %s class: %s\n" % (i['yang_name'], i['class'])
     if i["class"] == "leaf-list":
+
+      '''
+      if isinstance(i["type"]["native_names"], list):
+        for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
+          subsubname = safe_name(subname)
+
+          argname = i["type"]["native_type"]
+          if isinstance(argname, list):
+            argname = argname[0]
+
+          varName = varName + "_" + subsubname
+          nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
+                    varName,
+                    argname))
+          skipBodyCreation = True
+          createBody(varName, {}, None, nfd)
+
+      else:
+          argname = i["type"]["native_type"]
+          if isinstance(argname, list):
+            argname = argname[0]
+          nfd.write("func (d *%s) %s_Set(value []%s) bool {" % (structName, varName, argname))
+      '''
       #print '******************************************'
       #print "GO-STRUCT %s %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"], type(i["type"]["native_names"]))
       #print '******************************************'
       if isinstance(i["type"]["native_names"], list):
         for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
-          subsubname = "_".join(subname.split("-"))
-          if ":" in subsubname:
-            subsubname = "_".join(subsubname.split(':'))
+          subsubname = safe_name(subname)
 
-          elements_str += "\t%s_%s %s\n" % (elemName, subsubname, nativetype)
+          varname = nativetype
+          if isinstance(varname, list):
+            varname = varname[0]
+
+          elemName = elemName + '_' + subsubname
+          if keyname == i["name"]:
+            elements_str += "\t%s %s  %s\n" % (elemName, varname, LIST_KEY_STR)
+          else:
+            elements_str += "\t%s %s\n" % (elemName, varname)
       else:
-          subname = i["type"]["native_type"]
-          if isinstance(subname, list):
-            subname = subname[0]
-          elements_str += "\t%s []%s\n" % (elemName, subname)
+          varname = i["type"]["native_type"]
+          if isinstance(varname, list):
+            varname = varname[0]
+
+          if keyname == i["name"]:
+            elements_str += "\t%s []%s  %s\n" % (elemName, varname, LIST_KEY_STR)
+          else:
+            elements_str += "\t%s []%s\n" % (elemName, varname)
 
     elif i["class"] == "list":
       #print '******************************************'
-      #print "GO-STRUCT list %s %s %s" % (elemName, i["class"], i["type"])
+      #print "GO-STRUCT list %s %s %s %s" % (elemName, i["class"], i["type"], i["key"])
       #print '******************************************'
       listType = i["type"]
-      elements_str += "\t%s []%s" % (elemName, listType)
+
+      if keyname == i["name"]:
+        elements_str += "\t%s []%s  %s\n" % (elemName, listType, LIST_KEY_STR)
+      else:
+        elements_str += "\t%s []%s" % (elemName, listType)
+
     elif i["class"] == "union" or i["class"] == "leaf-union":
       #print '******************************************'
       #print "GO-STRUCT %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"])
@@ -967,24 +912,30 @@ def addGOStructMembers(elements, nfd):
       for subtype in i["type"][1]:
         # name just needs to be unique, choosing yang_type as postfix to the
         # oritional varialble
-        subname = "_".join(subtype[1]["yang_type"].split('-'))
-        if ":" in subname:
-          subname = "_".join(subname.split(':'))
+        subname = safe_name(subtype[1]["yang_type"])
 
         elemName = elemName + "_" + subname
         membertype = subtype[1]["native_type"]
         if isinstance(membertype, list):
           membertype = "[]%s" % membertype[0]
 
-      #nativeType = i["type"][1][0][1]["native_type"][0]
-      #nativeType = "[]%s" % nativeType
-        elements_str += "\t%s %s\n" % (elemName, membertype)
+        if keyname == i["name"]:
+          elements_str += "\t%s %s  %s\n" % (elemName, membertype, LIST_KEY_STR)
+        else:
+          elements_str += "\t%s %s\n" % (elemName, membertype)
     else:
+      #print '******************************************'
+      #print "GO-STRUCT element %s %s %s %s" % (elemName, i["class"], i["type"], i["name"])
+      #print '******************************************'
       membertype = i["type"]
       if isinstance(membertype, list):
         membertype = "[]%s" % membertype[0]
 
-      elements_str += "\t%s %s\n" % (elemName, membertype)
+      #print "i[name]", i["name"], keyval
+      if keyname == i["name"]:
+        elements_str += "\t%s %s  %s\n" % (elemName, membertype, LIST_KEY_STR)
+      else:
+        elements_str += "\t%s %s\n" % (elemName, membertype)
   elements_str += "}\n"
   nfd.write(elements_str + "\n")
 
@@ -1000,6 +951,10 @@ def createGOStructMethods(elements, nfd, structName):
       rangeStr = i["elemtype"]["restriction_dict"]["range"].strip('u').strip('\'')
       minMaxList = rangeStr.split('..')
       minVal, maxVal = minMaxList[0], minMaxList[1]
+
+      if maxVal == 'max':
+        maxVal = class_map[i["elemtype"]["native_type"]]["max"]
+
       nfd.write("\n\tif value < %s || value > %s {\n" % (minVal, maxVal))
       nfd.write("\t    return false\n")
       nfd.write("\t}\n")
@@ -1018,16 +973,15 @@ def createGOStructMethods(elements, nfd, structName):
     if i["class"] == "leaf-list":
       if isinstance(i["type"]["native_names"], list):
         for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
-          subsubname = "_".join(subname.split("-"))
-          if ":" in subsubname:
-            subsubname = "_".join(subsubname.split(":"))
+          subsubname = safe_name(subname)
 
-          argname = i["type"]["native_type"]
+          argname = nativetype
           if isinstance(argname, list):
             argname = argname[0]
 
+          varName = varName + "_" + subsubname
           nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
-                    varName + "_" + subsubname,
+                    varName,
                     argname))
           skipBodyCreation = True
           createBody(varName, {}, None, nfd)
@@ -1046,9 +1000,7 @@ def createGOStructMethods(elements, nfd, structName):
 
       for subtype in i["type"][1]:
         #print "UNION or UNION LEAF METHOD", subtype
-        subargname = "_".join(subtype[1]["yang_type"].split('-'))
-        if ":" in subargname:
-          subargname = "_".join(subargname.split(":"))
+        subargname = safe_name(subtype[1]["yang_type"])
 
         varName = varName + "_" + subargname
         argtype = subtype[1]["native_type"]
