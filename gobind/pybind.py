@@ -88,19 +88,19 @@ class_map = {
                           "base_type": True, "quote_arg": True},
   'binary':           {"native_type": "bitarray", "base_type": True,
                           "quote_arg": True},
-  'uint8':            {"native_type": "uint8", "base_type": True},
-  'uint16':           {"native_type": "uint16", "base_type": True},
-  'uint32':           {"native_type": "uint32", "base_type": True},
-  'uint64':           {"native_type": "uint64", "base_type": True},
+  'uint8':            {"native_type": "uint8", "base_type": True, "max": "^uint8(0)"},
+  'uint16':           {"native_type": "uint16", "base_type": True, "max": "^uint16(0)"},
+  'uint32':           {"native_type": "uint32", "base_type": True, "max": "^uint32(0)"},
+  'uint64':           {"native_type": "uint64", "base_type": True, "max": "^uint64(0)"},
   'string':           {"native_type": "string", "base_type": True,
                           "quote_arg": True},
   'decimal64':        {"native_type": "float64", "base_type": True},
   'empty':            {"native_type": "bool", "map": class_bool_map,
                           "base_type": True, "quote_arg": True},
-  'int8':             {"native_type": "int8", "base_type": True},
-  'int16':            {"native_type": "int16", "base_type": True},
-  'int32':            {"native_type": "int32", "base_type": True},
-  'int64':            {"native_type": "int64", "base_type": True},
+  'int8':             {"native_type": "int8", "base_type": True, "max": "^int8(0)"},
+  'int16':            {"native_type": "int16", "base_type": True, "max": "^int16(0)"},
+  'int32':            {"native_type": "int32", "base_type": True, "max": "^uint32(0)"},
+  'int64':            {"native_type": "int64", "base_type": True, "max": "^uint64(0)"},
 }
 
 # We have a set of types which support "range" statements in RFC6020. This
@@ -844,6 +844,29 @@ def addGOStructMembers(structName, elements, keyval, nfd):
 
     elements_str += "\t//yang_name: %s class: %s\n" % (i['yang_name'], i['class'])
     if i["class"] == "leaf-list":
+
+      '''
+      if isinstance(i["type"]["native_names"], list):
+        for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
+          subsubname = safe_name(subname)
+
+          argname = i["type"]["native_type"]
+          if isinstance(argname, list):
+            argname = argname[0]
+
+          varName = varName + "_" + subsubname
+          nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
+                    varName,
+                    argname))
+          skipBodyCreation = True
+          createBody(varName, {}, None, nfd)
+
+      else:
+          argname = i["type"]["native_type"]
+          if isinstance(argname, list):
+            argname = argname[0]
+          nfd.write("func (d *%s) %s_Set(value []%s) bool {" % (structName, varName, argname))
+      '''
       #print '******************************************'
       #print "GO-STRUCT %s %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"], type(i["type"]["native_names"]))
       #print '******************************************'
@@ -851,19 +874,24 @@ def addGOStructMembers(structName, elements, keyval, nfd):
         for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
           subsubname = safe_name(subname)
 
+          varname = nativetype
+          if isinstance(varname, list):
+            varname = varname[0]
+
+          elemName = elemName + '_' + subsubname
           if keyname == i["name"]:
-            elements_str += "\t%s_%s %s  %s\n" % (elemName, subsubname, nativetype, LIST_KEY_STR)
+            elements_str += "\t%s %s  %s\n" % (elemName, varname, LIST_KEY_STR)
           else:
-            elements_str += "\t%s_%s %s\n" % (elemName, subsubname, nativetype)
+            elements_str += "\t%s %s\n" % (elemName, varname)
       else:
-          subname = i["type"]["native_type"]
-          if isinstance(subname, list):
-            subname = subname[0]
+          varname = i["type"]["native_type"]
+          if isinstance(varname, list):
+            varname = varname[0]
 
           if keyname == i["name"]:
-            elements_str += "\t%s []%s  %s\n" % (elemName, subname, LIST_KEY_STR)
+            elements_str += "\t%s []%s  %s\n" % (elemName, varname, LIST_KEY_STR)
           else:
-            elements_str += "\t%s []%s\n" % (elemName, subname)
+            elements_str += "\t%s []%s\n" % (elemName, varname)
 
     elif i["class"] == "list":
       #print '******************************************'
@@ -891,10 +919,10 @@ def addGOStructMembers(structName, elements, keyval, nfd):
         if isinstance(membertype, list):
           membertype = "[]%s" % membertype[0]
 
-      if keyname == i["name"]:
-        elements_str += "\t%s %s  %s\n" % (elemName, membertype, LIST_KEY_STR)
-      else:
-        elements_str += "\t%s %s\n" % (elemName, membertype)
+        if keyname == i["name"]:
+          elements_str += "\t%s %s  %s\n" % (elemName, membertype, LIST_KEY_STR)
+        else:
+          elements_str += "\t%s %s\n" % (elemName, membertype)
     else:
       #print '******************************************'
       #print "GO-STRUCT element %s %s %s %s" % (elemName, i["class"], i["type"], i["name"])
@@ -923,6 +951,10 @@ def createGOStructMethods(elements, nfd, structName):
       rangeStr = i["elemtype"]["restriction_dict"]["range"].strip('u').strip('\'')
       minMaxList = rangeStr.split('..')
       minVal, maxVal = minMaxList[0], minMaxList[1]
+
+      if maxVal == 'max':
+        maxVal = class_map[i["elemtype"]["native_type"]]["max"]
+
       nfd.write("\n\tif value < %s || value > %s {\n" % (minVal, maxVal))
       nfd.write("\t    return false\n")
       nfd.write("\t}\n")
@@ -943,12 +975,13 @@ def createGOStructMethods(elements, nfd, structName):
         for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
           subsubname = safe_name(subname)
 
-          argname = i["type"]["native_type"]
+          argname = nativetype
           if isinstance(argname, list):
             argname = argname[0]
 
+          varName = varName + "_" + subsubname
           nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
-                    varName + "_" + subsubname,
+                    varName,
                     argname))
           skipBodyCreation = True
           createBody(varName, {}, None, nfd)
