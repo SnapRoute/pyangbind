@@ -844,29 +844,6 @@ def addGOStructMembers(structName, elements, keyval, nfd):
 
     elements_str += "\t//yang_name: %s class: %s\n" % (i['yang_name'], i['class'])
     if i["class"] == "leaf-list":
-
-      '''
-      if isinstance(i["type"]["native_names"], list):
-        for subname, nativetype in zip(i["type"]["native_names"], i["type"]["native_type"]):
-          subsubname = safe_name(subname)
-
-          argname = i["type"]["native_type"]
-          if isinstance(argname, list):
-            argname = argname[0]
-
-          varName = varName + "_" + subsubname
-          nfd.write("func (d *%s) %s_Set(value %s) bool {" % (structName,
-                    varName,
-                    argname))
-          skipBodyCreation = True
-          createBody(varName, {}, None, nfd)
-
-      else:
-          argname = i["type"]["native_type"]
-          if isinstance(argname, list):
-            argname = argname[0]
-          nfd.write("func (d *%s) %s_Set(value []%s) bool {" % (structName, varName, argname))
-      '''
       #print '******************************************'
       #print "GO-STRUCT %s %s %s %s %s" % (elemName, i["class"], i["type"]["native_names"], i["type"]["native_type"], type(i["type"]["native_names"]))
       #print '******************************************'
