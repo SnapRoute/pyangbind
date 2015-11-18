@@ -120,6 +120,7 @@ reserved_name = ["list", "str", "int", "global", "decimal", "float",
 
 
 ENABLE_CAMEL_CASE = True
+MODELS_PATH = "~\git\snaproute\src\models"
 
 def safe_name(arg):
   """
@@ -171,11 +172,15 @@ def executeGoFmtCommand (fd, command) :
             # open so this is a .tmp file, lets strip this for the new
             # file
             fmt_name = "fmt_" + fd.name.rstrip('.tmp')
-            print fmt_name
             nfd = os.open(fmt_name, os.O_RDWR|os.O_CREAT)
             os.write(nfd, out)
             os.close(nfd)
             print err
+            # lets copy the file to the models directory
+            #if err is None:
+            #  print os.path.abspath(nfd.name)
+              #os.rename(os.path.abspath(nfd.name))
+
         return out
 
 # Base machinery to support operation as a plugin to pyang.
@@ -190,9 +195,16 @@ class BTPyGOClass(plugin.PyangPlugin):
 
     def emit(self, ctx, modules, fd):
       # When called, call the build_pyangbind function.
-      build_pybind(ctx, modules, fd)
+      name = fd.name.split('.')[0]
 
-      executeGoFmtCommand(fd, ['gofmt %s' % fd.name])
+      fdDict = {"struct" : fd,
+                "enums" : open(name+"_enum.go", 'w'),
+                "func": open(name+"_func.go", 'w')}
+
+      build_pybind(ctx, modules, fdDict)
+
+      for f in fdDict.values():
+        executeGoFmtCommand(f, ['gofmt %s' % f.name])
 
 
     def add_opts(self, optparser):
@@ -251,7 +263,7 @@ class BTPyGOClass(plugin.PyangPlugin):
 # Core function to build the pyangbind output - starting with building the
 # dependencies - and then working through the instantiated tree that pyang has
 # already parsed.
-def build_pybind(ctx, modules, fd):
+def build_pybind(ctx, modules, fdDict):
 
   # Restrict the output of the plugin to only the modules that are supplied
   # to pyang. More modules are parsed by pyangbind to resolve typedefs and
@@ -274,7 +286,8 @@ def build_pybind(ctx, modules, fd):
   # Build the common set of imports that all pyangbind files needs
   ctx.pybind_common_hdr = ""
 
-  fd.write(ctx.pybind_common_hdr)
+  for fd in fdDict.values():
+    fd.write(ctx.pybind_common_hdr)
 
   # Determine all modules, and submodules that are needed, along with the
   # prefix that is used for it. We need to ensure that we understand all of the
@@ -329,6 +342,7 @@ def build_pybind(ctx, modules, fd):
 # this is temproary and specific to openconfig yang models.
   # the go packe name will be based on the name of the module
   # which contains either 1 or two names as seperated by "-"
+  '''
   pkgname = "openconfig_unknownpkg"
   for modname in pyang_called_modules:
     tmp = modname.split('-')
@@ -336,7 +350,12 @@ def build_pybind(ctx, modules, fd):
       pkgname = tmp[0] + "_" + tmp[1]
       break
   ctx.pybind_common_hdr = "package %s\n\n" %(pkgname,)
-  fd.write(ctx.pybind_common_hdr)
+  '''
+
+  ctx.pybind_common_hdr = "package models\n\n"
+  for fd in fdDict.values():
+    fd.write(ctx.pybind_common_hdr)
+
   #fd.write("import (\n")
   #fd.write("\t \"unicode\"\n")
   #fd.write(")\n")
@@ -348,14 +367,14 @@ def build_pybind(ctx, modules, fd):
   build_typedefs(ctx, defn['typedef'])
 
   # create the enumerations
-  CreateEnumerations(fd)
+  CreateEnumerations(fdDict["enums"])
 
   # create the structs and functions associated with the structs
-  CreateGoStructAndFunc(ctx, fd, module_d, pyang_called_modules)
+  CreateGoStructAndFunc(ctx, fdDict, module_d, pyang_called_modules)
 
 
 
-def CreateGoStructAndFunc(ctx, fd, module_d, pyang_called_modules):
+def CreateGoStructAndFunc(ctx, fdDict, module_d, pyang_called_modules):
   # Iterate through the tree which pyang has built, solely for the modules
   # that pyang was asked to build
   for modname in pyang_called_modules:
@@ -371,9 +390,9 @@ def CreateGoStructAndFunc(ctx, fd, module_d, pyang_called_modules):
                   if ch.keyword in statements.data_definition_keywords]
       # children = [ch for ch in m.i_groupings.values()
       #       if ch.keyword in statements.data_definition_keywords]
-      get_children(ctx, fd, children, m, m)
+      get_children(ctx, fdDict, children, m, m)
 
-
+enumerationDict = {}
 def CreateEnumerations(fd):
   # Build enumerations
   fd.write("""//enumerations\n""")
@@ -389,6 +408,8 @@ def CreateEnumerations(fd):
 
         name = k + "_" + e
         name = safe_name(name)
+        # save off the enum
+        enumerationDict.update({name:value})
         i = value
         i += 1
 
@@ -638,7 +659,7 @@ def find_definitions(defn, ctx, module, prefix):
       type_definitions[i.arg] = i
   return type_definitions
 
-def get_children(ctx, fd, i_children, module, parent, path=str(), \
+def get_children(ctx, fdDict, i_children, module, parent, path=str(), \
                  parent_cfg=True, choice=False):
   # Iterative function that is called for all elements that have childen
   # data nodes in the tree. This function resolves those nodes into the
@@ -649,8 +670,6 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
   # these leaves are within a choice or not.
   used_types,elements = [],[]
   choices = False
-
-  nfd = fd
 
   if parent_cfg:
     # The first time we find a container that has config false set on it
@@ -673,11 +692,11 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
       for choice_ch in ch.i_children:
         # these are case statements
         for case_ch in choice_ch.i_children:
-          elements += get_element(ctx, fd, case_ch, module, parent, \
+          elements += get_element(ctx, fdDict, case_ch, module, parent, \
             path+"/"+ch.arg, parent_cfg=parent_cfg, \
             choice=(ch.arg,choice_ch.arg))
     else:
-      elements += get_element(ctx, fd, ch, module, parent, path+"/"+ch.arg,\
+      elements += get_element(ctx, fdDict, ch, module, parent, path+"/"+ch.arg,\
         parent_cfg=parent_cfg, choice=choice)
       if ctx.opts.split_class_dir:
         if hasattr(ch, "i_children") and len(ch.i_children):
@@ -690,9 +709,9 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
 
     # create struct skeleton
     # this will create the beginning of the struct definition
-    structName = CreateStructSkeleton(module, nfd, parent, path)
+    structName = CreateStructSkeleton(module, fdDict["struct"], parent, path)
     if structName != '':
-      addStructDescription(module, nfd, parent, path)
+      addStructDescription(module, fdDict["struct"], parent, path)
     else:
       return None
   else:
@@ -716,7 +735,7 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
         keyval = [keyval,]
 
     # add the structure members
-    addGOStructMembers(structName, elements, keyval, nfd)
+    addGOStructMembers(structName, elements, keyval, fdDict["struct"])
 
 
     choices = {}
@@ -773,9 +792,9 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), \
     # TODO: get and set methods currently have errors that are reported that
     # are a bit ugly. The intention here is to act like an immutable type - such
     # that new class instances are created each time that the value is set.
-    structName = createGONewStructMethod(ctx, module, classes, nfd, parent, path)
+    structName = createGONewStructMethod(ctx, module, classes, fdDict["func"], parent, path)
     if structName != '':
-      createGOStructMethods(elements, nfd, structName)
+      createGOStructMethods(elements, fdDict["func"], structName)
 
   return None
 
@@ -847,7 +866,23 @@ def createGONewStructMethod(ctx, module, classes, nfd, parent, path):
                                         classes[c]["base"], default))
     nfd.write("\t\t}\n")
     nfd.write("\treturn new\n}\n\n")
+
+    # TODO: write unmarshalObject function
+    #func (obj Vlan) UnmarshalObject(body []byte) (ConfigObj, error) {
+    #var vlanObj Vlan
+    #var err error
+    #if err = json.Unmarshal(body, &vlanObj); err != nil  {
+    #    fmt.Println("### Vlan create called, unmarshal failed", vlanObj)
+    #}
+    #return vlanObj, err
+    #}
+    #if 'Config' == structName[-6:]:
+
+
+
   return structName
+
+
 
 
 def addGOStructMembers(structName, elements, keyval, nfd):
@@ -1198,7 +1233,7 @@ def build_elemtype(ctx, et, prefix=False):
       cls = elemtype["class_override"]
   return (cls,elemtype)
 
-def get_element(ctx, fd, element, module, parent, path,
+def get_element(ctx, fdDict, element, module, parent, path,
                   parent_cfg=True, choice=False):
   # Handle mapping of an invidual element within the model. This function
   # produces a dictionary that can then be mapped into the relevant code that
@@ -1237,19 +1272,19 @@ def get_element(ctx, fd, element, module, parent, path,
     # Create an element for a container.
     if element.i_children:
       chs = element.i_children
-      get_children(ctx, fd, chs, module, element, npath, parent_cfg=parent_cfg,\
+      get_children(ctx, fdDict, chs, module, element, npath, parent_cfg=parent_cfg,\
                    choice=choice)
       elemdict = {"name": safe_name(element.arg), "origtype": element.keyword,
-                          "class": element.keyword,
-                          "path": safe_name(npath), "config": True,
-                          "description": elemdescr,
-                          "yang_name": element.arg,
-                          "choice": choice,
+                  "class": element.keyword,
+                    "path": safe_name(npath), "config": True,
+                    "description": elemdescr,
+                    "yang_name": element.arg,
+                    "choice": choice,
                  }
       # Handle the different cases of class name, this depends on whether we
       # were asked to split the bindings into a directory structure or not.
 
-      elemdict["type"] = CreateStructSkeleton(module, fd, element, path, write=False)
+      elemdict["type"] = CreateStructSkeleton(module, None, element, path, write=False)
       print 'creating unique class name', elemdict["type"]
 
       # Deal with specific cases for list - such as the key and how it is
@@ -1431,14 +1466,6 @@ def get_element(ctx, fd, element, module, parent, path,
                         }
 
       elemntype = {"class": cls, "native_type": allowed_types, "native_names": subnames}
-
-
-      #print "=============================================================="
-      #print "ELEMNTYPE", elemntype
-      #print "=============================================================="
-
-
-
 
     else:
       if cls == "union" or cls == "leaf-union":
